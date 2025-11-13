@@ -1,0 +1,24 @@
+{
+  "buildCommand": "cd frontend && pnpm install && pnpm build",
+  "outputDirectory": "frontend/dist",
+  "env": {
+    "VITE_API_BASE_URL": "@api_base_url"
+  },
+  "rewrites": [
+    {
+      "source": "/api/v1/:path*",
+      "destination": "https://$RAILWAY_API_URL/api/v1/:path*"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=3600, s-maxage=3600"
+        }
+      ]
+    }
+  ]
+}
