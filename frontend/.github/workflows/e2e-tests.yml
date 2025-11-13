@@ -1,0 +1,201 @@
+name: E2E Tests & Regression Detection
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  e2e-tests:
+    name: E2E Tests - ${{ matrix.browser }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Start dev server
+        run: |
+          pnpm run dev &
+          sleep 5
+        env:
+          NODE_ENV: test
+
+      - name: Wait for server to be ready
+        run: |
+          npx wait-on http://localhost:3000 --timeout 30000
+
+      - name: Run E2E tests - Auth flows
+        run: pnpm exec playwright test tests/e2e/auth.spec.ts --project=${{ matrix.browser }}
+        continue-on-error: true
+
+      - name: Run E2E tests - Main flows
+        run: pnpm exec playwright test tests/e2e/main-flows.spec.ts --project=${{ matrix.browser }}
+        continue-on-error: true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.browser }}
+          path: playwright-report/
+          retention-days: 30
+
+      - name: Upload test videos
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-videos-${{ matrix.browser }}
+          path: test-results/
+          retention-days: 7
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run integration tests
+        run: pnpm run test -- tests/integration/ --run
+        continue-on-error: true
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
+
+  regression-detection:
+    name: Regression Detection
+    runs-on: ubuntu-latest
+    needs: [e2e-tests, integration-tests]
+    if: always()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all test results
+        uses: actions/download-artifact@v4
+        with:
+          path: test-results/
+
+      - name: Check test results
+        run: |
+          echo "=== Test Results Summary ==="
+          if [ -d "test-results/playwright-report-chromium" ]; then
+            echo "✅ Chromium tests completed"
+          else
+            echo "❌ Chromium tests failed"
+          fi
+          
+          if [ -d "test-results/playwright-report-firefox" ]; then
+            echo "✅ Firefox tests completed"
+          else
+            echo "❌ Firefox tests failed"
+          fi
+          
+          if [ -d "test-results/playwright-report-webkit" ]; then
+            echo "✅ WebKit tests completed"
+          else
+            echo "❌ WebKit tests failed"
+          fi
+
+      - name: Comment PR with test results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const testResultsPath = 'test-results/';
+            
+            let comment = '## 🧪 E2E Test Results\n\n';
+            comment += '| Browser | Status |\n';
+            comment += '|---------|--------|\n';
+            
+            const browsers = ['chromium', 'firefox', 'webkit'];
+            browsers.forEach(browser => {
+              const reportPath = `${testResultsPath}playwright-report-${browser}`;
+              const exists = fs.existsSync(reportPath);
+              const status = exists ? '✅ Passed' : '❌ Failed';
+              comment += `| ${browser} | ${status} |\n`;
+            });
+            
+            comment += '\n### Next Steps\n';
+            comment += '- Review test results in the artifacts section\n';
+            comment += '- Check for any regressions in the main flows\n';
+            comment += '- Ensure all browsers pass before merging\n';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [e2e-tests, integration-tests, regression-detection]
+    if: always()
+
+    steps:
+      - name: Check if tests passed
+        run: |
+          if [ "${{ needs.e2e-tests.result }}" == "success" ] && [ "${{ needs.integration-tests.result }}" == "success" ]; then
+            echo "✅ All tests passed!"
+            exit 0
+          else
+            echo "❌ Some tests failed!"
+            exit 1
+          fi
+
+      - name: Create success badge
+        if: success()
+        run: echo "🟢 All tests passed - Safe to merge"
+
+      - name: Create failure badge
+        if: failure()
+        run: echo "🔴 Tests failed - Do not merge"

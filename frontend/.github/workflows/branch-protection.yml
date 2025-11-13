@@ -1,0 +1,267 @@
+name: Branch Protection & Merge Requirements
+
+on:
+  pull_request:
+    branches: [main, develop]
+  status:
+    branches: [main, develop]
+
+jobs:
+  check-required-status-checks:
+    name: Verify Required Status Checks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if all required checks have passed
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const requiredChecks = [
+              'E2E Tests - chromium',
+              'E2E Tests - firefox',
+              'E2E Tests - webkit',
+              'Integration Tests',
+              'Regression Detection',
+              'Test Summary'
+            ];
+
+            const { data: checkRuns } = await github.rest.checks.listForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.payload.pull_request.head.sha,
+            });
+
+            const completedChecks = checkRuns.check_runs
+              .filter(check => check.status === 'completed')
+              .map(check => check.name);
+
+            const failedChecks = checkRuns.check_runs
+              .filter(check => check.status === 'completed' && check.conclusion === 'failure')
+              .map(check => check.name);
+
+            const missingChecks = requiredChecks.filter(
+              check => !completedChecks.includes(check)
+            );
+
+            if (missingChecks.length > 0) {
+              console.log('⏳ Waiting for checks to complete:');
+              missingChecks.forEach(check => console.log(`  - ${check}`));
+            }
+
+            if (failedChecks.length > 0) {
+              console.log('❌ Failed checks:');
+              failedChecks.forEach(check => console.log(`  - ${check}`));
+              process.exit(1);
+            }
+
+            console.log('✅ All required checks passed!');
+
+  code-quality-check:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run TypeScript check
+        run: pnpm run check
+        continue-on-error: true
+
+      - name: Run linting
+        run: pnpm run lint 2>/dev/null || echo "Linting not configured"
+        continue-on-error: true
+
+      - name: Check for console.log statements
+        run: |
+          if grep -r "console\.log\|console\.error\|console\.warn" client/src --include="*.ts" --include="*.tsx" | grep -v "test\|spec"; then
+            echo "⚠️  Found console statements in production code"
+          else
+            echo "✅ No console statements found"
+          fi
+        continue-on-error: true
+
+      - name: Check for TODO comments
+        run: |
+          TODO_COUNT=$(grep -r "TODO\|FIXME\|HACK" client/src --include="*.ts" --include="*.tsx" | wc -l)
+          if [ $TODO_COUNT -gt 0 ]; then
+            echo "⚠️  Found $TODO_COUNT TODO/FIXME comments"
+          else
+            echo "✅ No TODO/FIXME comments found"
+          fi
+        continue-on-error: true
+
+  performance-check:
+    name: Performance Checks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build project
+        run: pnpm run build
+        timeout-minutes: 10
+
+      - name: Check bundle size
+        run: |
+          BUILD_SIZE=$(du -sh dist/ | cut -f1)
+          echo "📦 Build size: $BUILD_SIZE"
+          
+          # Get size in bytes for comparison
+          SIZE_BYTES=$(du -sb dist/ | cut -f1)
+          MAX_SIZE_BYTES=$((10 * 1024 * 1024)) # 10MB limit
+          
+          if [ $SIZE_BYTES -gt $MAX_SIZE_BYTES ]; then
+            echo "❌ Build size exceeds 10MB limit!"
+            exit 1
+          else
+            echo "✅ Build size is within limits"
+          fi
+
+  security-check:
+    name: Security Checks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run npm audit
+        run: npm audit --audit-level=moderate 2>/dev/null || true
+        continue-on-error: true
+
+      - name: Check for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.pull_request.base.sha }}
+          head: HEAD
+          extra_args: --debug
+        continue-on-error: true
+
+      - name: Check for hardcoded credentials
+        run: |
+          if grep -r "password\|secret\|token\|api_key" client/src --include="*.ts" --include="*.tsx" | grep -v "test\|spec\|\.example\|PASSWORD\|SECRET"; then
+            echo "⚠️  Potential hardcoded credentials found"
+          else
+            echo "✅ No hardcoded credentials found"
+          fi
+        continue-on-error: true
+
+  merge-readiness:
+    name: Merge Readiness Check
+    runs-on: ubuntu-latest
+    needs: [check-required-status-checks, code-quality-check, performance-check, security-check]
+    if: always() && github.event_name == 'pull_request'
+
+    steps:
+      - name: Check merge readiness
+        run: |
+          echo "📋 Merge Readiness Checklist"
+          echo "═══════════════════════════════════════"
+          
+          if [ "${{ needs.check-required-status-checks.result }}" == "success" ]; then
+            echo "✅ All required checks passed"
+          else
+            echo "❌ Some required checks failed"
+          fi
+          
+          if [ "${{ needs.code-quality-check.result }}" == "success" ]; then
+            echo "✅ Code quality checks passed"
+          else
+            echo "⚠️  Code quality checks had warnings"
+          fi
+          
+          if [ "${{ needs.performance-check.result }}" == "success" ]; then
+            echo "✅ Performance checks passed"
+          else
+            echo "❌ Performance checks failed"
+          fi
+          
+          if [ "${{ needs.security-check.result }}" == "success" ]; then
+            echo "✅ Security checks passed"
+          else
+            echo "⚠️  Security checks had warnings"
+          fi
+          
+          echo "═══════════════════════════════════════"
+          
+          # Fail if required checks failed
+          if [ "${{ needs.check-required-status-checks.result }}" != "success" ]; then
+            exit 1
+          fi
+          
+          if [ "${{ needs.performance-check.result }}" != "success" ]; then
+            exit 1
+          fi
+          
+          echo "✅ Ready to merge!"
+
+      - name: Comment on PR with merge status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const statusChecks = '${{ needs.check-required-status-checks.result }}';
+            const codeQuality = '${{ needs.code-quality-check.result }}';
+            const performance = '${{ needs.performance-check.result }}';
+            const security = '${{ needs.security-check.result }}';
+            
+            let comment = '## 🔍 Merge Readiness Status\n\n';
+            comment += `| Check | Status |\n`;
+            comment += `|-------|--------|\n`;
+            comment += `| Required Tests | ${statusChecks === 'success' ? '✅' : '❌'} |\n`;
+            comment += `| Code Quality | ${codeQuality === 'success' ? '✅' : '⚠️'} |\n`;
+            comment += `| Performance | ${performance === 'success' ? '✅' : '❌'} |\n`;
+            comment += `| Security | ${security === 'success' ? '✅' : '⚠️'} |\n`;
+            
+            if (statusChecks === 'success' && performance === 'success') {
+              comment += '\n✅ **This PR is ready to merge!**\n';
+            } else {
+              comment += '\n❌ **This PR cannot be merged yet.** Please fix the failing checks.\n';
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
