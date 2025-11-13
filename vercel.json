@@ -1,6 +1,6 @@
 {
-  "buildCommand": "cd frontend && pnpm install && pnpm build",
-  "outputDirectory": "frontend/dist",
+  "buildCommand": "pnpm install && pnpm build",
+  "outputDirectory": "dist",
   "env": {
     "VITE_API_BASE_URL": "http://localhost:8000"
   },
