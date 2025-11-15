@@ -5,26 +5,45 @@ Handles password hashing and JWT token creation/validation.
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+import bcrypt
 from app.core.config import settings
 import uuid
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _truncate_password_bytes(password: str) -> bytes:
+    """
+    Truncate password to 72 bytes for bcrypt compatibility.
+    Bcrypt has a 72-byte limit, so we need to truncate by bytes, not characters.
+    """
+    password_bytes = password.encode('utf-8')
+    return password_bytes[:72]
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plain password against a hashed password."""
-    return pwd_context.verify(plain_password, hashed_password)
+    # Truncate password to 72 bytes before verification
+    password_bytes = _truncate_password_bytes(plain_password)
+    # bcrypt.checkpw expects bytes for both password and hash
+    hash_bytes = hashed_password.encode('utf-8') if isinstance(hashed_password, str) else hashed_password
+    try:
+        return bcrypt.checkpw(password_bytes, hash_bytes)
+    except Exception as e:
+        logger.warning(f"Password verification error: {e}")
+        return False
 
 
 def get_password_hash(password: str) -> str:
     """Hash a password for storing."""
-    truncated_password = password[:72]
-    return pwd_context.hash(truncated_password)
+    # Truncate password to 72 bytes before hashing
+    password_bytes = _truncate_password_bytes(password)
+    # Generate salt and hash
+    salt = bcrypt.gensalt(rounds=12)
+    hashed = bcrypt.hashpw(password_bytes, salt)
+    # Return as string
+    return hashed.decode('utf-8')
 
 
 def create_access_token(

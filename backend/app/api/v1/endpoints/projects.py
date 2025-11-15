@@ -13,6 +13,7 @@ from app.schemas.project import Project, ProjectCreate, ProjectUpdate
 router = APIRouter()
 
 
+@router.get("", response_model=List[Project])
 @router.get("/", response_model=List[Project])
 def get_projects(
     skip: int = 0,
@@ -73,6 +74,7 @@ def get_project(
     return project
 
 
+@router.post("", response_model=Project, status_code=status.HTTP_201_CREATED)
 @router.post("/", response_model=Project, status_code=status.HTTP_201_CREATED)
 def create_project(
     project_in: ProjectCreate,
