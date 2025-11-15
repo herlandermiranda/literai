@@ -1136,7 +1136,7 @@ Ce projet est sous licence MIT. Voir le fichier `LICENSE` pour plus de détails.
 
 ## Auteur
 
-**Manus AI** - Développé avec soin et professionnalisme.
+** Herlander **
 
 ## Remerciements
 
